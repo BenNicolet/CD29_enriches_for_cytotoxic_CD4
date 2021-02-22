@@ -1,0 +1,433 @@
+---
+title: "Analysis of 'CD29 enriches for cytotoxic CD4+ T cells'"
+author: "BP Nicolet"
+date: "22/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(plyr)
+library(dplyr)
+library(Seurat)
+#library(doMC) # needed to parallelize. Not all Seurat function have a functional parallele back-end...
+library(stringr)
+library(ggplot2)
+library(future)
+
+#doMC::registerDoMC(cores = 20) # Set 20 parallele cores
+
+knitr::opts_knit$set("/home/ben/Analysis/scRNA-seq/")
+
+```
+
+
+## prep stuff
+```{r preparing stuff}
+## here we use previously published datasets by Guo et al., Zhang et al., and Zheng et al. ##
+## See manuscript for reference ( https://doi.org/10.1101/2021.02.10.430576  )
+## The raw counts were accessed from the GEO (NCBI) repository (GSE99254, GSE98638, GSE108989) ##
+
+## Importing data ##
+scRNA_guo <- read.delim("/home/ben/Analysis/scRNA-seq/GSE99254_NSCLC.TCell.S12346.count.txt",header=T, sep="\t")
+scRNA_zheng <- read.delim("/home/ben/Analysis/scRNA-seq/GSE98638_HCC.TCell.S5063.count.txt",header=T, sep="\t")
+scRNA_zhang <- read.delim("/home/ben/Analysis/scRNA-seq/GSE108989_CRC.TCell.S11138.count.txt",header=T, sep="\t")
+head(scRNA_guo[1:10,1:10])
+dim(scRNA_guo)
+
+
+## selecting Peripheral blood CD4+ t cells (PTH and PTY) ##
+guo_CD4_25low <- select(scRNA_guo, contains("PTH")) 
+Zheng_CD4_25low <- select(scRNA_zheng, contains("PTH")) 
+Zhang_CD4_25low <- select(scRNA_zhang, contains("PTH")) 
+
+guo_CD4_25mid <- select(scRNA_guo, contains("PTY")) 
+Zhang_CD4_25mid <- select(scRNA_zhang, contains("PTY")) 
+
+## Formatting stuff ##
+## low ##
+Zheng_CD4_25low <- cbind("ID"=scRNA_zheng[,2:2],Zheng_CD4_25low)
+dim(Zheng_CD4_25low)
+
+Zhang_CD4_25low <- cbind("ID"=scRNA_zhang[,2:2],Zhang_CD4_25low)
+dim(Zhang_CD4_25low)
+
+guo_CD4_25low <- cbind("ID"=scRNA_guo[,2:2],guo_CD4_25low)
+dim(guo_CD4_25low)
+
+## mid ##
+Zhang_CD4_25mid <- cbind("ID"=scRNA_zhang[,2:2],Zhang_CD4_25mid)
+dim(Zhang_CD4_25low)
+
+guo_CD4_25mid <- cbind("ID"=scRNA_guo[,2:2],guo_CD4_25mid)
+dim(guo_CD4_25low)
+
+
+#head(guo_CD4_25low[1:10,1:10])
+
+## removing NAs ##
+guo_CD4_25low <- na.omit(guo_CD4_25low)
+Zheng_CD4_25low <- na.omit(Zheng_CD4_25low)
+Zhang_CD4_25low <- na.omit(Zhang_CD4_25low)
+Zhang_CD4_25mid <- na.omit(Zhang_CD4_25mid)
+guo_CD4_25mid <- na.omit(guo_CD4_25mid)
+
+
+##making rownames from IDs ##
+rownames(Zheng_CD4_25low) <- Zheng_CD4_25low$ID
+rownames(Zhang_CD4_25low) <- Zhang_CD4_25low$ID
+rownames(guo_CD4_25low) <- guo_CD4_25low$ID
+rownames(Zhang_CD4_25mid) <- Zhang_CD4_25mid$ID
+rownames(guo_CD4_25mid) <- guo_CD4_25mid$ID
+
+
+colnames(Zhang_CD4_25low)
+
+## Some patient names are not formated well in columns, Here I correct for it ##
+colnames_Zhang <- colnames(Zhang_CD4_25low)
+colnames_Zhang <- gsub("P0701.","",colnames_Zhang)
+colnames_Zhang <- gsub("PTH.","PTH",colnames_Zhang)
+colnames_Zhang <- gsub("\\.ZL","",colnames_Zhang)
+colnames_Zhang[476:477] <- paste0(colnames_Zhang[476:477],".PTH1")
+colnames_Zhang[478:553] <- paste0(colnames_Zhang[478:553],".PTH2")
+
+colnames(Zhang_CD4_25low) <- colnames_Zhang
+
+## merging stuff ##
+CD4_25low <- merge(Zheng_CD4_25low,guo_CD4_25low, by="ID")
+CD4_25low <- merge(CD4_25low,Zhang_CD4_25low, by="ID")
+CD4_25low <- merge(CD4_25low,Zhang_CD4_25mid, by="ID")
+CD4_25low <- merge(CD4_25low,guo_CD4_25mid, by="ID")
+
+
+## Keeping only rownames and dropping unused columns ##
+rownames(CD4_25low) <- CD4_25low$ID
+CD4_25low$ID <- NULL
+Zheng_CD4_25low$ID <- NULL
+Zhang_CD4_25low$ID <- NULL
+guo_CD4_25low$ID <- NULL
+
+Zhang_CD4_25mid$ID <- NULL
+guo_CD4_25mid$ID <- NULL
+
+CD4_25low$PTH1 <- NULL
+CD4_25low$PTH13 <- NULL
+CD4_25low$PTH20 <- NULL
+CD4_25low$PTH26 <- NULL
+CD4_25low$PTH44 <- NULL
+CD4_25low$PTH5 <- NULL
+CD4_25low$PTH8 <- NULL
+
+## visualizing ITGB1 (CD29) expression  in the datasets ##
+hist(log2(t(Zheng_CD4_25low["ITGB1",])))
+hist(log2(t(Zhang_CD4_25low["ITGB1",])))
+hist(log2(t(guo_CD4_25low["ITGB1",])))
+hist(log2(t(CD4_25low["ITGB1",])))
+
+
+## We found in prior analysis a cluster of naive-like CD4+ T cells with very high expression of KRT18 ##
+## We believe this is a contamination and decided to drop the cells with high expression ##
+
+hist(log2(t(CD4_25low["KRT18",])))
+
+KRT18_filt <- data.frame(t(CD4_25low["KRT18",]))
+KRT18_filt <- subset(KRT18_filt,KRT18_filt$KRT18<5)
+dim(KRT18_filt)
+dim(CD4_25low)
+CD4_25low <- CD4_25low %>% select(rownames(KRT18_filt))
+
+
+## We want to make sure that we do not include regulatory T cells in the analysis, so we remove cells with high FOXP3 expression ##
+hist(log2(t(CD4_25low["FOXP3",])))
+FOXP3_filt <- data.frame(t(CD4_25low["FOXP3",]))
+FOXP3_filt <- subset(FOXP3_filt,FOXP3_filt$FOXP3<8)
+dim(FOXP3_filt)
+dim(CD4_25low)
+
+CD4_25low <- CD4_25low %>% select(rownames(FOXP3_filt))
+dim(CD4_25low)
+
+
+## We make here a metadata table ## 
+sample_meta <- NULL
+sample_meta$cells <- colnames(CD4_ITGB1)
+sample_meta <- data.frame(sample_meta)
+
+sample_meta$batch <- str_split(as.character(sample_meta$cells), "\\.") ## Here we get the patient ID in the cell-name
+sample_meta$batch <- as.factor(sapply(sample_meta$batch, tail, 1))
+
+rownames(sample_meta) <- sample_meta$cells # putting the patient ID in rownames, and drop unused cols
+sample_meta$cells <- NULL
+CD4_25low$`scRNA_guo[, 2:2]` <- NULL
+
+
+dim(CD4_25low)
+table(sample_meta$batch) # No group with only 1 patient, all good.
+
+## making sure stuff are in the right order and found in both meta and count tables ##
+all(rownames(sample_meta) %in% colnames(CD4_25low))
+
+```
+
+
+## Preparing a Seurat object
+```{r Preparing a Seurat object}
+
+## Preparing a Seurat object ##
+CD4_sc_obj <- CreateSeuratObject(counts = CD4_25low, meta.data = sample_meta, project = "CD4_blood") 
+
+CD4_sc_obj@assays ## we have 3243 cells with 22988 features (genes)
+
+```
+
+
+## Data normalization
+```{r Data normalization}
+## Here we perform a log-normalization ##
+CD4_sc_obj <- NormalizeData(CD4_sc_obj, normalization.method = "LogNormalize", scale.factor = 10000)
+
+```
+
+## Data Preprocessing
+```{r Data Preprocessing}
+set.seed(123456)
+
+# pre-processing data + computing PCs ##
+CD4_sc_obj <- FindVariableFeatures(CD4_sc_obj)
+CD4_sc_obj <- ScaleData(CD4_sc_obj)
+
+ElbowPlot(CD4_sc_obj, ndims = 100)
+CD4_sc_obj <- RunPCA(CD4_sc_obj, npcs = 100, ndims.print = 1:5, nfeatures.print = 5)
+
+```
+
+
+## ITGB1 grouping
+```{r ITGB1 grouping}
+
+## Here we make group based on ITGB1 normalized counts ##
+ITGB1 <- data.frame("ITGB1"=CD4_sc_obj@assays$RNA@data["ITGB1",])
+#ITGB1 <- data.frame(t(ITGB1))
+hist(ITGB1)
+
+# ## plotting things to check if all good ##
+# ggplot(ITGB1, aes(x=ITGB1))+
+#   geom_histogram(binwidth = 0.4)+
+#   geom_vline(xintercept = 0.5)+
+#   theme_classic()+
+#   scale_x_continuous(expand = c(0,0))+
+#   scale_y_continuous(expand = c(0,0))
+
+ITGB1$ITGB1 <- ifelse(ITGB1$ITGB1>0.5, "A_CD29_pos", "B_CD29_neg")
+
+
+CD4_sc_obj <- AddMetaData(
+  object = CD4_sc_obj,
+  metadata = ITGB1,
+  col.name = "CD29_group")
+
+
+```
+
+
+## UMAP and subset selection
+```{r UMAP and subset selection}
+
+CD4_sc_obj <- RunUMAP(CD4_sc_obj, dims = 1:10)
+
+DimPlot(CD4_sc_obj, reduction = "umap",group.by = "CD29_group")
+DimPlot(CD4_sc_obj, reduction = "umap",group.by = "batch")
+
+FeaturePlot(CD4_sc_obj, features = c("GZMA"),ncol = 1,order = T,pt.size = 0.7)
+
+DimPlot(CD4_sc_obj, reduction = "umap",group.by = "ident")
+
+
+## Here we get T cell clusters ## 
+CD4_sc_obj <- FindNeighbors(CD4_sc_obj, dims = 1:10)
+CD4_sc_obj <- FindClusters(CD4_sc_obj, resolution = 0.4)
+DimPlot(CD4_sc_obj, reduction = "umap")
+
+## Finding markers for each cluster ## 
+CD4_sc_obj.markers.c0 <- FindMarkers(CD4_sc_obj, only.pos = F, min.pct = 0.25, logfc.threshold = 0.25,ident.1 =0) # Tn
+CD4_sc_obj.markers.c1 <- FindMarkers(CD4_sc_obj, only.pos = F, min.pct = 0.25, logfc.threshold = 0.25,ident.1 =1) # Tem
+CD4_sc_obj.markers.c2 <- FindMarkers(CD4_sc_obj, only.pos = F, min.pct = 0.25, logfc.threshold = 0.25,ident.1 =2) # Teff
+CD4_sc_obj.markers.c3 <- FindMarkers(CD4_sc_obj, only.pos = F, min.pct = 0.25, logfc.threshold = 0.25,ident.1 =3) # Tcm
+
+## Assigning new names to clusters ##
+new.cluster.ids <- c("Tn", "Tem", "Teff", "Tcm")
+names(new.cluster.ids) <- levels(CD4_sc_obj)
+CD4_sc_obj <- RenameIdents(CD4_sc_obj, new.cluster.ids)
+DimPlot(CD4_sc_obj, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+
+## Here checking expression of some markers ##
+FeaturePlot(CD4_sc_obj, features = c("ITGB1"),ncol = 1,order = T,pt.size = 0.7)
+FeaturePlot(CD4_sc_obj, features = c("CD55"),ncol = 1,order = T,pt.size = 0.7)
+FeaturePlot(CD4_sc_obj, features = c("IL6ST"),ncol = 1,order = T,pt.size = 0.7)
+
+## Here checking expression of T cell differentiation markers ##
+VlnPlot(CD4_sc_obj, features = "CX3CR1",pt.size = 0.2) + NoLegend() ## Teff markers
+VlnPlot(CD4_sc_obj, features = "ITGB1",pt.size = 0.2) + NoLegend() ## CD29
+VlnPlot(CD4_sc_obj, features = "CD55",pt.size = 0.2) + NoLegend() 
+VlnPlot(CD4_sc_obj, features = "IL6ST",pt.size = 0.2) + NoLegend()
+VlnPlot(CD4_sc_obj, features = "SELL",pt.size = 0.2) + NoLegend() ## CD62L
+VlnPlot(CD4_sc_obj, features = "CD27",pt.size = 0.2) + NoLegend()
+
+## some TFs ##
+VlnPlot(CD4_sc_obj, features = "GATA3",pt.size = 0.2) + NoLegend()
+VlnPlot(CD4_sc_obj, features = "TBX21",pt.size = 0.2) + NoLegend() ## T-bet
+VlnPlot(CD4_sc_obj, features = "RORC",pt.size = 0.2) + NoLegend() ## ROR-gamma T
+
+```
+
+
+## filter naive out ##
+```{r filter naive out}
+## As Tn are low for ITGB1 (CD29), we remove them as not to bias analysis ##
+
+CD4_sc_obj.no.naive <- subset(CD4_sc_obj, idents = c("Tem", "Teff", "Tcm")) # selecting subsets other than Tn
+CD4_sc_obj.no.naive <- RunPCA(CD4_sc_obj.no.naive, npcs = 100, ndims.print = 1:5, nfeatures.print = 10)
+CD4_sc_obj.no.naive <- RunUMAP(CD4_sc_obj.no.naive, dims = 1:10)
+
+DimPlot(CD4_sc_obj.no.naive, reduction = "umap",group.by = "ident",label = T)+ NoLegend()
+DimPlot(CD4_sc_obj.no.naive, reduction = "umap",group.by = "CD29_group")+ NoLegend()
+
+FeaturePlot(CD4_sc_obj.no.naive, features = c("ITGB1", "CXCR6", "TBX21","RORC", "ZNF683","GATA3"),ncol = 3)
+CD4_sc_obj@assays 
+
+```
+
+## Differential gene expression of CD29 groups in total CD4+ T cells
+```{r Differential gene expression of CD29 groups in total CD4+ T cells}
+
+CD4_sc_obj.markers <- FindMarkers(CD4_sc_obj, only.pos = F, min.pct = 0.1, logfc.threshold = 0.1, group.by = "CD29_group", ident.1 = "A_CD29_pos", ident.2 = "B_CD29_neg")
+CD4_sc_obj.markers$ID <- rownames(CD4_sc_obj.markers) ## rownames as IDs 
+
+CD4_sc_obj.markers["ITGB1",]$p_val_adj <- 10^-120 ## ITGB1 is at 0 (too many zeros to store in memory), so we put it in the corner of the plot (that is ~120 )
+
+## plotting DEG in a volcano plot ##
+ggplot(CD4_sc_obj.markers,aes(x=avg_logFC,y=-log10(p_val_adj)))+
+  geom_point(stroke=0, size=2)+
+  geom_point(data=CD4_sc_obj.markers[CD4_sc_obj.markers$p_val_adj<0.05 & abs(CD4_sc_obj.markers$avg_logFC)>0.25,], color="#ff2300",stroke=0,size=2)+
+  theme_classic()+
+  scale_x_continuous(limits = c(-2.3,2.3))+
+  scale_y_continuous(limits = c(0,121), expand = c(0,0))+
+  geom_hline(yintercept = -log10(0.05))+
+  geom_vline(xintercept = (-0.25))+
+  geom_vline(xintercept = (0.25))+
+  ggrepel::geom_text_repel(data=CD4_sc_obj.markers[CD4_sc_obj.markers$p_val_adj<0.001 & (CD4_sc_obj.markers$avg_logFC>0.6 | CD4_sc_obj.markers$avg_logFC<=-0.4),], aes(label=ID),min.segment.length = 0.01)+
+  theme(aspect.ratio = 1)
+  
+
+CD4_sc_obj.markers$ID <- rownames(CD4_sc_obj.markers) ## rownames as IDs 
+
+## Exporting DEG results ##
+write.table(CD4_sc_obj.markers,"ITGB1Hi_vs_Lo_Zheng_Zhang_Guo_combined_CD25low+mid.csv",sep=";",dec=",", row.names = F)
+
+```
+
+
+## ITGB1 density in mem
+```{r ITGB1 density in mem}
+
+ITGB1_mem <- data.frame(CD4_sc_obj.no.naive@assays$RNA["ITGB1"])
+ITGB1_mem <- data.frame(t(ITGB1_mem))
+hist(ITGB1_mem$ITGB1)
+
+## plotting ITGB1 expression in non-naive cells##
+ggplot(ITGB1_mem, aes(x=ITGB1))+
+  geom_histogram(binwidth = 0.4)+
+  geom_vline(xintercept = 0.5)+
+  theme_classic()+
+  scale_x_continuous(expand = c(0,0))+
+  scale_y_continuous(expand = c(0,0))
+
+```
+
+
+## Differential gene expression of CD29 groups in non-naive CD4+ T cells
+```{r Differential gene expression of CD29 groups in non-naive CD4+ T cells}
+
+CD4_sc_obj.no.naive.markers <- FindMarkers(CD4_sc_obj.no.naive, only.pos = F, min.pct = 0.1, logfc.threshold = 0.1, group.by = "CD29_group", ident.1 = "A_CD29_pos", ident.2 = "B_CD29_neg")
+CD4_sc_obj.no.naive.markers$ID <- rownames(CD4_sc_obj.no.naive.markers) ## rownames as IDs 
+
+CD4_sc_obj.no.naive.markers["ITGB1",]$p_val_adj <- 10^-29 ## ITGB1 is at 0 (too many zeros to store in memory), so we put it in the corner of the plot (that is ~29 )
+
+## plotting DEG in a volcano plot ##
+ggplot(CD4_sc_obj.no.naive.markers,aes(x=avg_logFC,y=-log10(p_val_adj)))+
+  geom_point(stroke=0, size=2)+
+  geom_point(data=CD4_sc_obj.no.naive.markers[CD4_sc_obj.no.naive.markers$p_val_adj<0.05 & abs(CD4_sc_obj.no.naive.markers$avg_logFC)>0.25,], color="#ff2300",stroke=0,size=2)+
+  theme_classic()+
+#  scale_x_continuous(limits = c(-1.5,1.5))+
+  scale_y_continuous(limits = c(0,31), expand = c(0,0))+
+  geom_hline(yintercept = -log10(0.05))+
+  geom_vline(xintercept = (-0.25))+
+  geom_vline(xintercept = (0.25))+
+  ggrepel::geom_text_repel(data=CD4_sc_obj.no.naive.markers[CD4_sc_obj.no.naive.markers$p_val_adj<0.01 & (CD4_sc_obj.no.naive.markers$avg_logFC>0.4 | CD4_sc_obj.no.naive.markers$avg_logFC<=-0.25),], aes(label=ID),min.segment.length = 0.01)+
+  theme(aspect.ratio = 1)
+  
+
+## Exporting DEG results ##
+write.table(CD4_sc_obj.no.naive.markers,"ITGB1Hi_vs_Lo_NoNaive_Zheng_Zhang_Guo_combined_CD25low+mid.csv",sep=";",dec=",", row.names = F)
+
+```
+
+
+## visualizing markers and interesting targets
+```{r visualizing markers and interesting targets}
+
+## in all cells ##
+FeaturePlot(CD4_sc_obj, features = c("ITGB1", "CX3CR1", "CD55","IL6ST", "SLAMF7","FOXP3"),ncol = 3)
+FeaturePlot(CD4_sc_obj, features = c("IFNG", "TNF", "GZMA", "GZMB","GNLY", "FGFBP2"),ncol = 3)
+FeaturePlot(CD4_sc_obj, features = c("ITGB1", "CX3CR1", "CD55","IL6ST", "SLAMF7","GATA3"),ncol = 3)
+FeaturePlot(CD4_sc_obj, features = c("ITGB1", "FOXP3", "TBX21","RORC", "ZNF683","GATA3"),ncol = 3)
+
+## in non-naive ##
+FeaturePlot(CD4_sc_obj.no.naive, features = c("ITGB1", "CX3CR1", "CD55","IL6ST", "SLAMF7","FOXP3"),ncol = 3)
+FeaturePlot(CD4_sc_obj.no.naive, features = c("IFNG", "TNF", "GZMA", "GZMB","GNLY", "FGFBP2"),ncol = 3)
+FeaturePlot(CD4_sc_obj.no.naive, features = c("ITGB1", "CX3CR1", "CD55","IL6ST", "SLAMF7","GATA3"),ncol = 3)
+FeaturePlot(CD4_sc_obj.no.naive, features = c("ITGB1", "FOXP3", "TBX21","RORC", "ZNF683","GATA3"),ncol = 3)
+
+## violin plots in non-naive ##
+VlnPlot(CD4_sc_obj.no.naive, features = c("GZMA","GZMB","GZMH","GNLY"),group.by = "CD29_group",ncol = 2)+NoLegend()
+VlnPlot(CD4_sc_obj.no.naive, features = c("FGFBP2","PRF1","CCL5","S100A4"),group.by = "CD29_group",ncol = 2)+NoLegend()
+VlnPlot(CD4_sc_obj.no.naive, features = c("CX3CR1", "CD55","IL6ST", "SLAMF7"),group.by = "CD29_group",ncol = 2 ) + NoLegend()
+
+```
+
+
+## Comparison of CD4 and CD8 CTLs
+```{r Comparison of CD4 and CD8 CTLs}
+## Here we compare the data of this analysis, with these of Nicolet et al 2020 in PNAS ##
+## See main manuscript for reference ##
+
+CD8_guo <- read.delim("/home/ben/Analysis/scRNA-seq/CD8_Guo_PTC_cd29+-_limma_results_notfiltered.csv", sep = ";",dec = ",")
+
+CD4_CTL <- read.delim("ITGB1Hi_vs_Lo_Zheng_Zhang_Guo_combined_CD25low+mid.csv",sep=";",dec=",")
+
+CD4_CTL$logFC_CD4 <- CD4_CTL$avg_logFC
+CD4_CTL$padj<- CD4_CTL$p_val_adj
+
+CD4_CD8_CTL <- merge(CD4_CTL,CD8_guo,by="ID") ## merging tables 
+
+CD4_CD8_CTL <- subset(CD4_CD8_CTL,CD4_CD8_CTL$p_val_adj<0.05 | CD4_CD8_CTL$padj.y<0.05) ## making sure that we have DEG 
+
+## making a nice plot : ) ##
+ggplot(CD4_CD8_CTL,aes(x=logFC,y=logFC_CD4))+
+  geom_point(data=CD4_CD8_CTL[CD4_CD8_CTL$logFC_CD4>0 & CD4_CD8_CTL$logFC>0,],color="red")+ ## up-genes
+  geom_point(data=CD4_CD8_CTL[CD4_CD8_CTL$logFC_CD4< -0 & CD4_CD8_CTL$logFC< -0,],color="green")+ ## down-genes
+  ggrepel::geom_text_repel(data=CD4_CD8_CTL[CD4_CD8_CTL$logFC_CD4> 0.5 & CD4_CD8_CTL$logFC<0.5,], aes(label=ID),min.segment.length = 0.01,size=2.5)+
+  ggrepel::geom_text_repel(data=CD4_CD8_CTL[CD4_CD8_CTL$logFC_CD4>0.25 & CD4_CD8_CTL$logFC>0.5 | CD4_CD8_CTL$ID=="ZNF683",], aes(label=ID),min.segment.length = 0.01,size=2.5)+
+  ggrepel::geom_text_repel(data=CD4_CD8_CTL[CD4_CD8_CTL$logFC_CD4< -0.25 & CD4_CD8_CTL$logFC< -0.2 | CD4_CD8_CTL$ID=="CD55",], aes(label=ID),min.segment.length = 0.01,size=2.5)+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  scale_x_continuous(limits = c(-1,3))+
+  scale_y_continuous(limits = c(-1,1.5))+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+
+
+```
+
